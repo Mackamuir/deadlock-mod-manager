@@ -450,7 +450,235 @@ impl VpkManager {
     None
   }
 
-  /// Replace VPK files for a mod with new ones
+  /// Copy VPK files from source directory to the mod store (mods/{modId}/files/)
+  /// This replaces `copy_vpks_with_prefix` in the new hardlink-based flow.
+  pub fn copy_vpks_to_store(
+    &self,
+    source_dir: &Path,
+    store_files_dir: &Path,
+  ) -> Result<Vec<String>, Error> {
+    let mut vpk_files = Vec::new();
+    self.collect_vpks_from_dir(source_dir, &mut vpk_files)?;
+    vpk_files.sort();
+
+    let mut stored_names = Vec::new();
+    self.filesystem.create_directories(store_files_dir)?;
+
+    for vpk_path in vpk_files {
+      if let Some(file_name) = vpk_path.file_name().and_then(|n| n.to_str()) {
+        let dest_path = store_files_dir.join(file_name);
+        self.filesystem.copy_file(&vpk_path, &dest_path)?;
+        stored_names.push(file_name.to_string());
+        log::info!("Copied VPK to store: {} -> {:?}", vpk_path.display(), dest_path);
+      }
+    }
+
+    Ok(stored_names)
+  }
+
+  /// Copy selected VPK files from extracted directory to the mod store based on file tree selection.
+  /// This replaces `copy_selected_vpks_with_prefix` in the new hardlink-based flow.
+  pub fn copy_selected_vpks_to_store(
+    &self,
+    source_dir: &Path,
+    store_files_dir: &Path,
+    file_tree: &crate::mod_manager::file_tree::ModFileTree,
+  ) -> Result<Vec<String>, Error> {
+    let mut all_vpk_files = Vec::new();
+    self.collect_vpks_from_dir(source_dir, &mut all_vpk_files)?;
+
+    // Create a map of relative paths to full paths
+    let mut vpk_map: std::collections::HashMap<String, std::path::PathBuf> =
+      std::collections::HashMap::new();
+    for vpk_path in all_vpk_files {
+      if let Ok(relative_path) = vpk_path.strip_prefix(source_dir) {
+        let relative_str = relative_path.to_string_lossy().replace('\\', "/");
+        vpk_map.insert(relative_str, vpk_path);
+      }
+    }
+
+    let mut stored_names = Vec::new();
+    self.filesystem.create_directories(store_files_dir)?;
+
+    for file in &file_tree.files {
+      if !file.is_selected {
+        continue;
+      }
+
+      let normalized_path = file.path.replace('\\', "/");
+      if let Some(vpk_path) = vpk_map.get(&normalized_path) {
+        if let Some(file_name) = vpk_path.file_name().and_then(|n| n.to_str()) {
+          let dest_path = store_files_dir.join(file_name);
+          self.filesystem.copy_file(vpk_path, &dest_path)?;
+          stored_names.push(file_name.to_string());
+          log::info!("Copied selected VPK to store: {} -> {:?}", vpk_path.display(), dest_path);
+        }
+      } else {
+        log::warn!("Selected VPK file not found in extracted directory: {}", file.path);
+      }
+    }
+
+    Ok(stored_names)
+  }
+
+  /// Create hardlinks (or copies as fallback) from the mod store to the addons directory
+  /// with sequential pak##_dir.vpk naming.
+  pub fn link_vpks_to_addons(
+    &self,
+    store_files_dir: &Path,
+    addons_path: &Path,
+  ) -> Result<Vec<String>, Error> {
+    let mut vpk_files = self.filesystem.get_files_with_extension(store_files_dir, "vpk")?;
+    vpk_files.sort();
+
+    if vpk_files.is_empty() {
+      return Err(Error::ModInvalid(
+        "No VPK files found in mod store. Mod needs to be downloaded first.".into(),
+      ));
+    }
+
+    self.filesystem.create_directories(addons_path)?;
+    let mut installed_names = Vec::new();
+
+    for vpk_path in &vpk_files {
+      let next_number = self.find_next_available_vpk_number(addons_path)?;
+      let pak_name = format!("pak{next_number:02}_dir.vpk");
+      let dest_path = addons_path.join(&pak_name);
+
+      let was_hardlink = self.filesystem.create_hardlink_or_copy(vpk_path, &dest_path)?;
+      log::info!(
+        "Linked VPK to addons ({}): {:?} -> {pak_name}",
+        if was_hardlink { "hardlink" } else { "copy" },
+        vpk_path.file_name().unwrap_or_default()
+      );
+      installed_names.push(pak_name);
+    }
+
+    Ok(installed_names)
+  }
+
+  /// Remove enabled VPK files (pak##_dir.vpk) from the addons directory.
+  /// The original files remain safe in the mod store.
+  pub fn unlink_vpks_from_addons(
+    &self,
+    addons_path: &Path,
+    installed_vpks: &[String],
+  ) -> Result<(), Error> {
+    for vpk_name in installed_vpks {
+      let vpk_path = addons_path.join(vpk_name);
+      if vpk_path.exists() {
+        self.filesystem.remove_file(&vpk_path)?;
+        log::info!("Unlinked VPK from addons: {vpk_name}");
+      } else {
+        log::warn!("VPK not found for unlinking: {vpk_name}");
+      }
+    }
+    Ok(())
+  }
+
+  /// Reorder VPKs by deleting all pak##_dir.vpk from addons and re-creating links
+  /// from the mod store in the specified order.
+  pub fn reorder_vpks_from_store(
+    &self,
+    mod_store_mapping: &[(String, std::path::PathBuf)], // (mod_id, store_files_dir)
+    addons_path: &Path,
+  ) -> Result<Vec<(String, Vec<String>)>, Error> {
+    if !addons_path.exists() {
+      return Err(Error::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("Addons path not found: {addons_path:?}"),
+      )));
+    }
+
+    log::info!(
+      "Starting store-based VPK reordering for {} mods",
+      mod_store_mapping.len()
+    );
+
+    // Step 1: Delete all pak##_dir.vpk files from addons
+    let vpk_pattern = Regex::new(r"^pak\d+_dir\.vpk$").unwrap();
+    for entry in fs::read_dir(addons_path)? {
+      let entry = entry?;
+      let path = entry.path();
+      if path.is_file()
+        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        && vpk_pattern.is_match(name)
+      {
+        fs::remove_file(&path)?;
+        log::debug!("Removed {name} for reorder");
+      }
+    }
+
+    // Step 2: Re-create links in order
+    let mut updated_mappings = Vec::new();
+    for (mod_id, store_dir) in mod_store_mapping {
+      if !store_dir.exists() {
+        log::warn!("Store directory not found for mod {mod_id}: {store_dir:?}");
+        updated_mappings.push((mod_id.clone(), Vec::new()));
+        continue;
+      }
+
+      let new_vpks = self.link_vpks_to_addons(store_dir, addons_path)?;
+      log::info!("Reordered mod {mod_id}: {:?}", new_vpks);
+      updated_mappings.push((mod_id.clone(), new_vpks));
+    }
+
+    log::info!("Store-based VPK reordering completed successfully");
+    Ok(updated_mappings)
+  }
+
+  /// Replace VPK files for a mod: updates store files first, then re-links if enabled.
+  pub fn replace_vpks_with_store(
+    &self,
+    store_files_dir: &Path,
+    addons_path: &Path,
+    source_vpk_paths: &[std::path::PathBuf],
+    installed_vpks: &[String],
+  ) -> Result<Vec<String>, Error> {
+    if source_vpk_paths.is_empty() {
+      return Err(Error::InvalidInput(
+        "No VPK files provided for replacement".into(),
+      ));
+    }
+
+    log::info!(
+      "Replacing {} VPK file(s) via store at {:?}",
+      source_vpk_paths.len(),
+      store_files_dir
+    );
+
+    // Clear existing store files
+    if store_files_dir.exists() {
+      let old_vpks = self.filesystem.get_files_with_extension(store_files_dir, "vpk")?;
+      for old_vpk in old_vpks {
+        self.filesystem.remove_file(&old_vpk)?;
+      }
+    }
+
+    // Copy new source VPKs into store
+    self.filesystem.create_directories(store_files_dir)?;
+    for source_path in source_vpk_paths {
+      if let Some(file_name) = source_path.file_name() {
+        let dest_path = store_files_dir.join(file_name);
+        self.filesystem.copy_file(source_path, &dest_path)?;
+      }
+    }
+
+    // If mod is enabled, re-link from store to addons
+    let is_enabled = !installed_vpks.is_empty();
+    if is_enabled {
+      // Remove old addons links
+      self.unlink_vpks_from_addons(addons_path, installed_vpks)?;
+      // Create new links
+      let new_vpks = self.link_vpks_to_addons(store_files_dir, addons_path)?;
+      log::info!("Re-linked replaced VPKs: {:?}", new_vpks);
+      return Ok(new_vpks);
+    }
+
+    Ok(Vec::new())
+  }
+
+  /// Replace VPK files for a mod with new ones (legacy)
   /// Handles both enabled (pak##_dir.vpk) and disabled (modid_*.vpk) mods
   pub fn replace_vpks(
     &self,

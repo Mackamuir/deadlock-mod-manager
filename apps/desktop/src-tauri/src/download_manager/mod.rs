@@ -358,36 +358,16 @@ impl DownloadManager {
 
     log::info!("Processing downloaded files for mod: {}", task.mod_id);
 
-    // Get game path
-    let game_path = {
+    // Get store files directory for this mod
+    let store_files_dir = {
       let manager = MANAGER.lock().unwrap();
-      manager
-        .get_steam_manager()
-        .get_game_path()
-        .ok_or(Error::GamePathNotSet)?
-        .clone()
-    };
-
-    let addons_path = if let Some(ref profile_folder) = task.profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(profile_folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
+      manager.get_mod_files_dir(&task.mod_id)?
     };
 
     log::info!(
-      "Using addons path for profile: {addons_path:?} (profile_folder: {:?})",
+      "Using store files dir: {store_files_dir:?} (profile_folder: {:?})",
       task.profile_folder
     );
-
-    // Create addons directory if it doesn't exist (for profile folders)
-    if !addons_path.exists() {
-      log::info!("Creating addons directory: {addons_path:?}");
-      std::fs::create_dir_all(&addons_path)?;
-    }
 
     use crate::mod_manager::file_tree::FileTreeAnalyzer;
 
@@ -437,10 +417,9 @@ impl DownloadManager {
                     task.mod_id
                   );
 
-                  let copied_vpks = vpk_manager.copy_selected_vpks_with_prefix(
+                  let copied_vpks = vpk_manager.copy_selected_vpks_to_store(
                     &extracted_dir,
-                    &addons_path,
-                    &task.mod_id,
+                    &store_files_dir,
                     provided_file_tree,
                   )?;
 
@@ -505,12 +484,12 @@ impl DownloadManager {
               return Ok(());
             }
 
-            // Single file - proceed with normal copy
+            // Single file - copy to store
             log::info!(
-              "Mod has single VPK file, copying directly for mod: {}",
+              "Mod has single VPK file, copying to store for mod: {}",
               task.mod_id
             );
-            vpk_manager.copy_vpks_with_prefix(&extracted_dir, &addons_path, &task.mod_id)?;
+            vpk_manager.copy_vpks_to_store(&extracted_dir, &store_files_dir)?;
 
             // Clean up extracted directory and archive after successful copy
             log::info!("Removing extracted directory: {extracted_dir:?}");
@@ -524,8 +503,8 @@ impl DownloadManager {
               task.mod_id,
               e
             );
-            // Fallback to normal copy if analysis fails
-            vpk_manager.copy_vpks_with_prefix(&extracted_dir, &addons_path, &task.mod_id)?;
+            // Fallback to normal copy to store if analysis fails
+            vpk_manager.copy_vpks_to_store(&extracted_dir, &store_files_dir)?;
             std::fs::remove_dir_all(&extracted_dir)?;
             std::fs::remove_file(file_path)?;
           }

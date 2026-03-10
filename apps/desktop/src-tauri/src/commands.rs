@@ -415,6 +415,14 @@ pub async fn reorder_mods_by_remote_id(
 }
 
 #[tauri::command]
+pub async fn recover_mod_links(
+  profile_folder: Option<String>,
+) -> Result<Vec<(String, Vec<String>)>, Error> {
+  let mut mod_manager = MANAGER.lock().unwrap();
+  mod_manager.recover_mod_links(profile_folder)
+}
+
+#[tauri::command]
 pub async fn is_game_running() -> Result<bool, Error> {
   let mut mod_manager = MANAGER.lock().unwrap();
   mod_manager.is_game_running()
@@ -893,13 +901,14 @@ pub async fn copy_selected_vpks_from_archive(
   use crate::mod_manager::vpk_manager::VpkManager;
 
   log::info!(
-    "Copying selected VPKs from extracted directory for mod: {} (profile: {profile_folder:?})",
+    "Copying selected VPKs from extracted directory to store for mod: {} (profile: {profile_folder:?})",
     mod_id
   );
 
   let mod_manager = MANAGER.lock().unwrap();
   let mods_path = mod_manager.get_mods_store_path()?;
   let mod_dir = mods_path.join(&mod_id);
+  let store_files_dir = mod_dir.join("files");
 
   let extracted_dir = mod_dir.join("extracted");
 
@@ -929,30 +938,11 @@ pub async fn copy_selected_vpks_from_archive(
     log::info!("Using already-extracted directory: {extracted_dir:?}");
   }
 
-  let game_path = mod_manager
-    .get_steam_manager()
-    .get_game_path()
-    .ok_or(Error::GamePathNotSet)?
-    .clone();
-
-  let addons_path = if let Some(ref folder) = profile_folder {
-    game_path
-      .join("game")
-      .join("citadel")
-      .join("addons")
-      .join(folder)
-  } else {
-    game_path.join("game").join("citadel").join("addons")
-  };
-
-  if !addons_path.exists() {
-    std::fs::create_dir_all(&addons_path)?;
-  }
-
   drop(mod_manager); // Release lock before file operations
 
+  // Copy selected VPKs to the mod store (not addons)
   let vpk_manager = VpkManager::new();
-  vpk_manager.copy_selected_vpks_with_prefix(&extracted_dir, &addons_path, &mod_id, &file_tree)?;
+  vpk_manager.copy_selected_vpks_to_store(&extracted_dir, &store_files_dir, &file_tree)?;
 
   // Clean up extracted directory after copying
   log::info!("Removing extracted directory: {extracted_dir:?}");
@@ -969,7 +959,7 @@ pub async fn copy_selected_vpks_from_archive(
     }
   }
 
-  log::info!("Successfully copied selected VPKs for mod: {}", mod_id);
+  log::info!("Successfully copied selected VPKs to store for mod: {}", mod_id);
   Ok(())
 }
 
@@ -978,60 +968,44 @@ pub async fn copy_local_mod_vpks(
   mod_id: String,
   profile_folder: Option<String>,
 ) -> Result<Vec<String>, Error> {
-  use crate::mod_manager::vpk_manager::VpkManager;
+  use crate::mod_manager::filesystem_helper::FileSystemHelper;
 
   log::info!(
-    "Copying VPKs from local mod files directory for mod: {} (profile: {profile_folder:?})",
+    "Verifying VPKs in store for local mod: {} (profile: {profile_folder:?})",
     mod_id
   );
 
   let mod_manager = MANAGER.lock().unwrap();
-  let mods_path = mod_manager.get_mods_store_path()?;
-  let mod_dir = mods_path.join(&mod_id);
-  let files_dir = mod_dir.join("files");
+  let files_dir = mod_manager.get_mod_files_dir(&mod_id)?;
+  drop(mod_manager);
 
   if !files_dir.exists() {
     return Err(Error::ModFileNotFound);
   }
 
-  let game_path = mod_manager
-    .get_steam_manager()
-    .get_game_path()
-    .ok_or(Error::GamePathNotSet)?
-    .clone();
+  // Just verify files exist in the store and return their names.
+  // Actual linking to addons happens during install_mod.
+  let filesystem = FileSystemHelper::new();
+  let vpk_files = filesystem.get_files_with_extension(&files_dir, "vpk")?;
 
-  let addons_path = if let Some(ref folder) = profile_folder {
-    game_path
-      .join("game")
-      .join("citadel")
-      .join("addons")
-      .join(folder)
-  } else {
-    game_path.join("game").join("citadel").join("addons")
-  };
-
-  if !addons_path.exists() {
-    std::fs::create_dir_all(&addons_path)?;
-  }
-
-  drop(mod_manager);
-
-  let vpk_manager = VpkManager::new();
-  let prefixed_vpks = vpk_manager.copy_vpks_with_prefix(&files_dir, &addons_path, &mod_id)?;
-
-  if prefixed_vpks.is_empty() {
-    log::warn!("No VPK files found in mod files directory: {files_dir:?}");
+  if vpk_files.is_empty() {
+    log::warn!("No VPK files found in mod store directory: {files_dir:?}");
     return Err(Error::InvalidInput(
       "No VPK files found in mod directory".to_string(),
     ));
   }
 
+  let vpk_names: Vec<String> = vpk_files
+    .iter()
+    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+    .collect();
+
   log::info!(
-    "Successfully copied {} VPKs for local mod: {}",
-    prefixed_vpks.len(),
+    "Verified {} VPKs in store for local mod: {}",
+    vpk_names.len(),
     mod_id
   );
-  Ok(prefixed_vpks)
+  Ok(vpk_names)
 }
 
 #[tauri::command]

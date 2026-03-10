@@ -166,6 +166,35 @@ impl FileSystemHelper {
       .unwrap_or(false)
   }
 
+  /// Create a hardlink from source to dest, falling back to copy if hardlinking fails
+  /// (e.g., cross-volume, unsupported filesystem, permission errors).
+  /// Returns `true` if a hardlink was created, `false` if it fell back to copy.
+  pub fn create_hardlink_or_copy(&self, source: &Path, dest: &Path) -> Result<bool, Error> {
+    if let Some(parent) = dest.parent() {
+      self.create_directories(parent)?;
+    }
+
+    if dest.exists() {
+      fs::remove_file(dest)?;
+    }
+
+    match fs::hard_link(source, dest) {
+      Ok(()) => {
+        log::debug!("Created hardlink: {:?} -> {:?}", dest, source);
+        Ok(true)
+      }
+      Err(e) => {
+        log::debug!(
+          "hard_link failed ({e}), falling back to copy: {:?} -> {:?}",
+          source,
+          dest
+        );
+        fs::copy(source, dest)?;
+        Ok(false)
+      }
+    }
+  }
+
   /// Check if two paths point to the same location (handles symlinks and Windows junctions)
   pub fn paths_point_to_same_location(&self, path1: &Path, path2: &Path) -> bool {
     match (fs::canonicalize(path1), fs::canonicalize(path2)) {

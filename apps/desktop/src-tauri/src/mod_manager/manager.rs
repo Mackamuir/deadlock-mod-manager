@@ -132,6 +132,29 @@ impl ModManager {
     self.file_tree_analyzer.get_mod_file_tree(mod_path)
   }
 
+  /// Get the store files directory for a mod: mods/{modId}/files/
+  pub fn get_mod_files_dir(&self, mod_id: &str) -> Result<PathBuf, Error> {
+    Ok(self.get_mods_store_path()?.join(mod_id).join("files"))
+  }
+
+  /// Get the addons path for a profile
+  fn get_addons_path(&self, profile_folder: Option<&String>) -> Result<PathBuf, Error> {
+    let game_path = self
+      .steam_manager
+      .get_game_path()
+      .ok_or(Error::GamePathNotSet)?;
+
+    Ok(if let Some(folder) = profile_folder {
+      game_path
+        .join("game")
+        .join("citadel")
+        .join("addons")
+        .join(folder)
+    } else {
+      game_path.join("game").join("citadel").join("addons")
+    })
+  }
+
   pub fn install_mod(
     &mut self,
     mut deadlock_mod: Mod,
@@ -147,75 +170,42 @@ impl ModManager {
       self.setup_game_for_mods()?;
     }
 
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let store_files_dir = self.get_mod_files_dir(&deadlock_mod.id)?;
 
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
+    // Primary path: link from mod store to addons
+    if store_files_dir.exists()
+      && !self
+        .filesystem
+        .get_files_with_extension(&store_files_dir, "vpk")?
+        .is_empty()
+    {
+      log::info!(
+        "Store files found at {:?}, linking to addons",
+        store_files_dir
+      );
 
-    // Find prefixed VPKs in addons (mod is downloaded but not enabled)
-    let mut prefixed_vpks = self
-      .vpk_manager
-      .find_prefixed_vpks(&addons_path, &deadlock_mod.id)?;
+      let original_names: Vec<String> = self
+        .filesystem
+        .get_files_with_extension(&store_files_dir, "vpk")?
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+        .collect();
 
-    // Recover older local imports that were added before prefixed VPKs were copied.
-    if prefixed_vpks.is_empty() && deadlock_mod.id.starts_with("local-") {
-      let local_files_dir = self
-        .get_mods_store_path()?
-        .join(&deadlock_mod.id)
-        .join("files");
-
-      if local_files_dir.exists() {
-        log::info!(
-          "No prefixed VPKs found for local mod {}, restoring from {:?}",
-          deadlock_mod.id,
-          local_files_dir
-        );
-        prefixed_vpks = self.vpk_manager.copy_vpks_with_prefix(
-          &local_files_dir,
-          &addons_path,
-          &deadlock_mod.id,
-        )?;
-      }
-    }
-
-    if prefixed_vpks.is_empty() {
-      log::error!("No prefixed VPKs found for mod {}", deadlock_mod.id);
-      return Err(Error::ModInvalid(
-        "Mod needs to be downloaded first. No VPK files found in addons folder.".into(),
-      ));
-    }
-
-    log::info!(
-      "Found {} prefixed VPKs, enabling them by removing prefix",
-      prefixed_vpks.len()
-    );
-
-    // Enable by renaming prefixed VPKs to sequential numbering
-    let installed_vpks =
-      self
+      let installed_vpks = self
         .vpk_manager
-        .enable_vpks(&addons_path, &deadlock_mod.id, &prefixed_vpks)?;
+        .link_vpks_to_addons(&store_files_dir, &addons_path)?;
 
-    deadlock_mod.installed_vpks = installed_vpks;
-    deadlock_mod.original_vpk_names = prefixed_vpks
-      .iter()
-      .map(|name| {
-        name
-          .strip_prefix(&format!("{}_", deadlock_mod.id))
-          .unwrap_or(name)
-          .to_string()
-      })
-      .collect();
+      deadlock_mod.installed_vpks = installed_vpks;
+      deadlock_mod.original_vpk_names = original_names;
+    } else {
+      // Legacy fallback: migrate prefixed VPKs from addons into the store
+      log::info!(
+        "No store files for mod {}, trying legacy migration",
+        deadlock_mod.id
+      );
+      return self.install_mod_legacy(deadlock_mod, profile_folder);
+    }
 
     log::info!("Adding mod to managed mods list");
     self.mod_repository.add_mod(deadlock_mod.clone());
@@ -230,6 +220,84 @@ impl ModManager {
     Ok(deadlock_mod)
   }
 
+  /// Legacy install path: handles mods that still use prefixed VPKs in addons.
+  /// Migrates them into the store before enabling via hardlinks.
+  fn install_mod_legacy(
+    &mut self,
+    mut deadlock_mod: Mod,
+    profile_folder: Option<String>,
+  ) -> Result<Mod, Error> {
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let store_files_dir = self.get_mod_files_dir(&deadlock_mod.id)?;
+
+    // Find prefixed VPKs in addons
+    let prefixed_vpks = self
+      .vpk_manager
+      .find_prefixed_vpks(&addons_path, &deadlock_mod.id)?;
+
+    if prefixed_vpks.is_empty() {
+      log::error!(
+        "No store files and no prefixed VPKs found for mod {}",
+        deadlock_mod.id
+      );
+      return Err(Error::ModInvalid(
+        "Mod needs to be downloaded first. No VPK files found.".into(),
+      ));
+    }
+
+    log::info!(
+      "Migrating {} prefixed VPKs to store for mod {}",
+      prefixed_vpks.len(),
+      deadlock_mod.id
+    );
+
+    // Migrate: copy prefixed VPKs from addons to store (stripping prefix)
+    self.filesystem.create_directories(&store_files_dir)?;
+    let prefix = format!("{}_", deadlock_mod.id);
+
+    for prefixed_name in &prefixed_vpks {
+      let original_name = prefixed_name
+        .strip_prefix(&prefix)
+        .unwrap_or(prefixed_name);
+      let src = addons_path.join(prefixed_name);
+      let dest = store_files_dir.join(original_name);
+      self.filesystem.copy_file(&src, &dest)?;
+      log::info!("Migrated {prefixed_name} -> store/{original_name}");
+    }
+
+    // Remove old prefixed VPKs from addons
+    for prefixed_name in &prefixed_vpks {
+      let path = addons_path.join(prefixed_name);
+      self.filesystem.remove_file(&path)?;
+    }
+
+    // Now enable via hardlinks from the store
+    let original_names: Vec<String> = self
+      .filesystem
+      .get_files_with_extension(&store_files_dir, "vpk")?
+      .iter()
+      .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+      .collect();
+
+    let installed_vpks = self
+      .vpk_manager
+      .link_vpks_to_addons(&store_files_dir, &addons_path)?;
+
+    deadlock_mod.installed_vpks = installed_vpks;
+    deadlock_mod.original_vpk_names = original_names;
+
+    log::info!("Adding mod to managed mods list");
+    self.mod_repository.add_mod(deadlock_mod.clone());
+
+    if deadlock_mod.install_order.is_some() {
+      log::info!("Mod has install order, triggering reorder to maintain sequence");
+      self.reorder_all_mods_for_profile(profile_folder)?;
+    }
+
+    log::info!("Legacy mod installation (enable) completed successfully");
+    Ok(deadlock_mod)
+  }
+
   pub fn uninstall_mod(
     &mut self,
     mod_id: String,
@@ -238,49 +306,19 @@ impl ModManager {
   ) -> Result<(), Error> {
     log::info!("Uninstalling (disabling) mod: {mod_id} (profile: {profile_folder:?})");
 
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
-
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
 
     if !addons_path.exists() {
       return Err(Error::GamePathNotSet);
     }
 
-    // Check if the mod is in memory
-    if let Some(mut local_mod) = self.mod_repository.get_mod(&mod_id).cloned() {
+    // Determine which VPKs to remove from addons
+    let installed_vpks = if let Some(local_mod) = self.mod_repository.get_mod(&mod_id) {
       log::info!("Mod found in memory: {}", local_mod.name);
-
-      // Disable by renaming installed VPKs to prefixed format
-      let prefixed_vpks = self.vpk_manager.disable_vpks(
-        &addons_path,
-        &mod_id,
-        &local_mod.installed_vpks,
-        &local_mod.original_vpk_names,
-      )?;
-
-      // Update mod state to track prefixed VPKs
-      local_mod.installed_vpks = Vec::new();
-      self.mod_repository.add_mod(local_mod);
-
-      log::info!(
-        "Disabled mod {mod_id} with {} prefixed VPKs",
-        prefixed_vpks.len()
-      );
+      local_mod.installed_vpks.clone()
     } else if !vpks.is_empty() {
-      log::warn!("Mod not found in repository, disabling VPKs directly");
-      // VPKs from local analysis may be full paths; extract just filenames for disable_vpks
-      let vpk_filenames: Vec<String> = vpks
+      log::warn!("Mod not found in repository, using VPKs from frontend");
+      vpks
         .iter()
         .map(|v| {
           std::path::Path::new(v)
@@ -288,15 +326,29 @@ impl ModManager {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| v.clone())
         })
-        .collect();
-      self
-        .vpk_manager
-        .disable_vpks(&addons_path, &mod_id, &vpk_filenames, &vpk_filenames)?;
-      log::info!("Disabled {} VPKs for mod {mod_id}", vpk_filenames.len());
+        .collect()
     } else {
       log::warn!("Mod not found in repository and no VPKs provided");
+      return Ok(());
+    };
+
+    // Remove VPK links/copies from addons (originals safe in mod store)
+    self
+      .vpk_manager
+      .unlink_vpks_from_addons(&addons_path, &installed_vpks)?;
+
+    // Also clean up any legacy prefixed VPKs that may exist
+    self
+      .vpk_manager
+      .remove_vpks_by_mod_id(&addons_path, &mod_id)?;
+
+    // Update mod state
+    if let Some(mut local_mod) = self.mod_repository.get_mod(&mod_id).cloned() {
+      local_mod.installed_vpks = Vec::new();
+      self.mod_repository.add_mod(local_mod);
     }
 
+    log::info!("Disabled mod {mod_id}");
     Ok(())
   }
 
@@ -308,49 +360,31 @@ impl ModManager {
   ) -> Result<(), Error> {
     log::info!("Purging mod: {mod_id} (profile: {profile_folder:?})");
 
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
-
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
 
     if !addons_path.exists() {
       return Err(Error::GamePathNotSet);
     }
 
-    // Remove VPK files from game (both installed and prefixed)
+    // Remove VPK files from addons (both installed links and legacy prefixed)
     if let Some(local_mod) = self.mod_repository.remove_mod(&mod_id) {
       log::info!("Mod found in memory: {}", local_mod.name);
 
-      // Remove installed VPKs if any
       if !local_mod.installed_vpks.is_empty() {
         self
           .vpk_manager
-          .remove_vpks(&local_mod.installed_vpks, &addons_path)?;
+          .unlink_vpks_from_addons(&addons_path, &local_mod.installed_vpks)?;
       }
-
-      // Also remove any prefixed VPKs
-      self
-        .vpk_manager
-        .remove_vpks_by_mod_id(&addons_path, &mod_id)?;
-    } else {
-      // Remove both specified VPKs and any prefixed VPKs
+    } else if !vpks.is_empty() {
       self.vpk_manager.remove_vpks(&vpks, &addons_path)?;
-      self
-        .vpk_manager
-        .remove_vpks_by_mod_id(&addons_path, &mod_id)?;
     }
 
-    // Remove the mod's folder from user's local app data
+    // Also remove any legacy prefixed VPKs
+    self
+      .vpk_manager
+      .remove_vpks_by_mod_id(&addons_path, &mod_id)?;
+
+    // Remove the mod's folder from user's local app data (including store files)
     let mods_path = self.get_mods_store_path()?;
     let user_mod_dir = mods_path.join(&mod_id);
 
@@ -366,42 +400,36 @@ impl ModManager {
 
   /// Reorder all mods based on their current install_order for a specific profile
   fn reorder_all_mods_for_profile(&mut self, profile_folder: Option<String>) -> Result<(), Error> {
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
-
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let mods_store = self.get_mods_store_path()?;
 
     log::info!("Reordering all mods based on install order for profile: {profile_folder:?}");
 
-    // Collect all mods and sort by install order
-    let mut ordered_mods: Vec<Mod> = self.mod_repository.get_all_mods().cloned().collect();
+    // Collect all enabled mods and sort by install order
+    let mut ordered_mods: Vec<Mod> = self
+      .mod_repository
+      .get_all_mods()
+      .filter(|m| !m.installed_vpks.is_empty())
+      .cloned()
+      .collect();
     ordered_mods.sort_by_key(|mod_entry| mod_entry.install_order.unwrap_or(999));
 
-    // Create mapping for reordering
-    let mod_vpk_mapping: Vec<(String, Vec<String>)> = ordered_mods
+    // Build store-based mapping for reordering
+    let mod_store_mapping: Vec<(String, PathBuf)> = ordered_mods
       .iter()
-      .map(|mod_entry| (mod_entry.id.clone(), mod_entry.installed_vpks.clone()))
+      .map(|m| (m.id.clone(), mods_store.join(&m.id).join("files")))
       .collect();
 
-    // Reorder the VPK files
     let updated_vpk_mappings = self
       .vpk_manager
-      .reorder_vpks(&mod_vpk_mapping, &addons_path)?;
+      .reorder_vpks_from_store(&mod_store_mapping, &addons_path)?;
 
     // Update mod data with new VPK names
-    for (mut mod_entry, (_, new_vpk_names)) in ordered_mods.into_iter().zip(updated_vpk_mappings) {
-      mod_entry.installed_vpks = new_vpk_names;
-      self.mod_repository.add_mod(mod_entry); // This will replace the existing mod
+    for (mod_id, new_vpk_names) in updated_vpk_mappings {
+      if let Some(mut mod_entry) = self.mod_repository.remove_mod(&mod_id) {
+        mod_entry.installed_vpks = new_vpk_names;
+        self.mod_repository.add_mod(mod_entry);
+      }
     }
 
     log::info!("All mods reordered successfully");
@@ -414,20 +442,8 @@ impl ModManager {
     mod_order_data: Vec<(String, Vec<String>, u32)>, // (remote_id, current_vpks, order)
     profile_folder: Option<String>,
   ) -> Result<Vec<(String, Vec<String>)>, Error> {
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
-
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let mods_store = self.get_mods_store_path()?;
 
     log::info!(
       "Reordering mods by remote ID for {} mods in profile: {:?}",
@@ -435,31 +451,28 @@ impl ModManager {
       profile_folder
     );
 
-    // Log the input data for debugging
-    for (remote_id, vpks, order) in &mod_order_data {
-      log::info!("Input: mod {remote_id} has order {order} with VPKs: {vpks:?}");
-    }
-
     // Sort by order
     let mut sorted_data = mod_order_data;
     sorted_data.sort_by_key(|(_, _, order)| *order);
 
-    // Log the sorted data
-    log::info!("Sorted order:");
-    for (i, (remote_id, vpks, order)) in sorted_data.iter().enumerate() {
-      log::info!("Position {i}: mod {remote_id} (order {order}) with VPKs: {vpks:?}");
+    for (i, (remote_id, _vpks, order)) in sorted_data.iter().enumerate() {
+      log::info!("Position {i}: mod {remote_id} (order {order})");
     }
 
-    // Create mapping for VPK reordering: (identifier, vpk_files)
-    let mod_vpk_mapping: Vec<(String, Vec<String>)> = sorted_data
-      .into_iter()
-      .map(|(remote_id, vpk_files, _)| (remote_id, vpk_files))
+    // Build store-based mapping
+    let mod_store_mapping: Vec<(String, PathBuf)> = sorted_data
+      .iter()
+      .map(|(remote_id, _, _)| {
+        (
+          remote_id.clone(),
+          mods_store.join(remote_id).join("files"),
+        )
+      })
       .collect();
 
-    // Reorder the VPK files and get the updated mappings
     let updated_mappings = self
       .vpk_manager
-      .reorder_vpks(&mod_vpk_mapping, &addons_path)?;
+      .reorder_vpks_from_store(&mod_store_mapping, &addons_path)?;
 
     for (remote_id, new_vpks) in &updated_mappings {
       if let Some(mut mod_entry) = self.mod_repository.remove_mod(remote_id) {
@@ -478,53 +491,34 @@ impl ModManager {
     mod_order_data: Vec<(String, u32)>,
     profile_folder: Option<String>,
   ) -> Result<Vec<Mod>, Error> {
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
-
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let mods_store = self.get_mods_store_path()?;
 
     log::info!(
       "Reordering {} mods for profile: {profile_folder:?}",
       mod_order_data.len()
     );
 
-    // Sort mod order data by the specified order
     let mut sorted_order = mod_order_data;
     sorted_order.sort_by_key(|(_, order)| *order);
 
-    // Create mapping of mod_id -> vpk_files for reordering
-    let mut mod_vpk_mapping = Vec::new();
+    let mut mod_store_mapping = Vec::new();
     let mut updated_mods = Vec::new();
 
     for (mod_id, new_order) in sorted_order {
       if let Some(mut deadlock_mod) = self.mod_repository.remove_mod(&mod_id) {
-        // Update the install order
         deadlock_mod.install_order = Some(new_order);
-
-        // Add to mapping for VPK reordering
-        mod_vpk_mapping.push((mod_id.clone(), deadlock_mod.installed_vpks.clone()));
+        mod_store_mapping.push((mod_id.clone(), mods_store.join(&mod_id).join("files")));
         updated_mods.push(deadlock_mod);
       } else {
         log::warn!("Mod not found in repository: {mod_id}");
       }
     }
 
-    // Reorder the VPK files
     let updated_vpk_mappings = self
       .vpk_manager
-      .reorder_vpks(&mod_vpk_mapping, &addons_path)?;
+      .reorder_vpks_from_store(&mod_store_mapping, &addons_path)?;
 
-    // Update mod data with new VPK names and re-add to repository
     let mut result_mods = Vec::new();
     for (mut deadlock_mod, (_, new_vpk_names)) in updated_mods.into_iter().zip(updated_vpk_mappings)
     {
@@ -602,6 +596,14 @@ impl ModManager {
       return Ok(0);
     }
 
+    // Collect IDs of mods that are currently installed (have enabled VPKs)
+    let installed_mod_ids: std::collections::HashSet<String> = self
+      .mod_repository
+      .get_all_mods()
+      .filter(|m| !m.installed_vpks.is_empty())
+      .map(|m| m.id.clone())
+      .collect();
+
     let mut freed = 0u64;
     for entry in std::fs::read_dir(&mods_path)? {
       let entry = entry?;
@@ -609,11 +611,34 @@ impl ModManager {
       if !path.is_dir() {
         continue;
       }
-      if entry.file_name().to_string_lossy().starts_with("local-") {
+      let dir_name = entry.file_name().to_string_lossy().to_string();
+
+      // Skip local mods entirely
+      if dir_name.starts_with("local-") {
         continue;
       }
-      freed += dir_size(&path);
-      self.filesystem.remove_directory_recursive(&path)?;
+
+      if installed_mod_ids.contains(&dir_name) {
+        // Mod is installed: only delete extracted/ and archive files, preserve files/
+        let extracted_dir = path.join("extracted");
+        if extracted_dir.exists() {
+          freed += dir_size(&extracted_dir);
+          self.filesystem.remove_directory_recursive(&extracted_dir)?;
+        }
+        // Delete archive files (zip, rar, 7z, etc.) but not the files/ directory
+        for file_entry in std::fs::read_dir(&path)? {
+          let file_entry = file_entry?;
+          let file_path = file_entry.path();
+          if file_path.is_file() {
+            freed += file_path.metadata().map(|m| m.len()).unwrap_or(0);
+            self.filesystem.remove_file(&file_path)?;
+          }
+        }
+      } else {
+        // Mod not installed: safe to delete entirely
+        freed += dir_size(&path);
+        self.filesystem.remove_directory_recursive(&path)?;
+      }
     }
 
     log::info!("Cleared download cache: {freed} bytes freed");
@@ -674,7 +699,7 @@ impl ModManager {
     Ok(app_local_data_dir.join("mods"))
   }
 
-  /// Replace VPK files for a mod
+  /// Replace VPK files for a mod: updates store files, then re-links if enabled
   pub fn replace_mod_vpks(
     &mut self,
     mod_id: String,
@@ -683,50 +708,39 @@ impl ModManager {
     profile_folder: Option<String>,
   ) -> Result<(), Error> {
     log::info!("Replacing VPK files for mod: {mod_id} (profile: {profile_folder:?})");
-    log::info!("Installed VPKs from frontend: {installed_vpks_from_frontend:?}");
 
-    let game_path = self
-      .steam_manager
-      .get_game_path()
-      .ok_or(Error::GamePathNotSet)?;
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let store_files_dir = self.get_mod_files_dir(&mod_id)?;
 
-    let addons_path = if let Some(ref folder) = profile_folder {
-      game_path
-        .join("game")
-        .join("citadel")
-        .join("addons")
-        .join(folder)
-    } else {
-      game_path.join("game").join("citadel").join("addons")
-    };
-
-    // Use VPK info from frontend first, then try repository, then look for prefixed VPKs
-    let (installed_vpks, original_names) = if !installed_vpks_from_frontend.is_empty() {
-      log::info!("Using installed VPKs from frontend");
-      (installed_vpks_from_frontend, Vec::new())
+    let installed_vpks = if !installed_vpks_from_frontend.is_empty() {
+      installed_vpks_from_frontend
     } else if let Some(mod_info) = self.mod_repository.get_mod(&mod_id) {
-      log::info!("Found mod in repository: {mod_id}");
-      (
-        mod_info.installed_vpks.clone(),
-        mod_info.original_vpk_names.clone(),
-      )
+      mod_info.installed_vpks.clone()
     } else {
-      log::info!(
-        "Mod not in repository and no installed VPKs provided, will find VPKs by prefix: {mod_id}"
-      );
-      // Mod not in repository - it might be disabled or the repository wasn't loaded
-      // We'll let replace_vpks find the prefixed VPKs directly
-      (Vec::new(), Vec::new())
+      Vec::new()
     };
 
-    // Use VpkManager to replace the files
-    self.vpk_manager.replace_vpks(
+    let new_vpks = self.vpk_manager.replace_vpks_with_store(
+      &store_files_dir,
       &addons_path,
-      &mod_id,
       &source_vpk_paths,
       &installed_vpks,
-      &original_names,
     )?;
+
+    // Update repository with new VPK names if mod was enabled
+    if !new_vpks.is_empty() {
+      if let Some(mut mod_entry) = self.mod_repository.get_mod(&mod_id).cloned() {
+        mod_entry.installed_vpks = new_vpks;
+        let original_names: Vec<String> = self
+          .filesystem
+          .get_files_with_extension(&store_files_dir, "vpk")?
+          .iter()
+          .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+          .collect();
+        mod_entry.original_vpk_names = original_names;
+        self.mod_repository.add_mod(mod_entry);
+      }
+    }
 
     log::info!("Successfully replaced VPK files for mod: {mod_id}");
     Ok(())
@@ -831,6 +845,74 @@ impl ModManager {
 
   pub fn get_autoexec_manager(&self) -> &AutoexecManager {
     &self.autoexec_manager
+  }
+
+  /// Recover missing VPK links in addons by re-creating them from the mod store.
+  /// Returns a list of (mod_id, new_vpk_names) for each recovered mod.
+  pub fn recover_mod_links(
+    &mut self,
+    profile_folder: Option<String>,
+  ) -> Result<Vec<(String, Vec<String>)>, Error> {
+    let addons_path = self.get_addons_path(profile_folder.as_ref())?;
+    let mods_store = self.get_mods_store_path()?;
+
+    log::info!("Starting mod link recovery for profile: {profile_folder:?}");
+
+    let mut recovered = Vec::new();
+    let enabled_mods: Vec<Mod> = self
+      .mod_repository
+      .get_all_mods()
+      .filter(|m| !m.installed_vpks.is_empty())
+      .cloned()
+      .collect();
+
+    for mod_entry in enabled_mods {
+      let store_dir = mods_store.join(&mod_entry.id).join("files");
+      if !store_dir.exists() {
+        log::warn!(
+          "Store files missing for enabled mod {}, cannot recover",
+          mod_entry.id
+        );
+        continue;
+      }
+
+      // Check if any addons links are missing
+      let needs_recovery = mod_entry
+        .installed_vpks
+        .iter()
+        .any(|vpk_name| !addons_path.join(vpk_name).exists());
+
+      if !needs_recovery {
+        continue;
+      }
+
+      log::info!("Recovering links for mod: {}", mod_entry.id);
+
+      // Remove any stale links
+      for vpk_name in &mod_entry.installed_vpks {
+        let p = addons_path.join(vpk_name);
+        if p.exists() {
+          std::fs::remove_file(&p).ok();
+        }
+      }
+
+      // Re-link from store
+      let new_vpks = self
+        .vpk_manager
+        .link_vpks_to_addons(&store_dir, &addons_path)?;
+
+      // Update repository
+      if let Some(mut m) = self.mod_repository.remove_mod(&mod_entry.id) {
+        m.installed_vpks = new_vpks.clone();
+        self.mod_repository.add_mod(m);
+      }
+
+      recovered.push((mod_entry.id.clone(), new_vpks));
+      log::info!("Recovered mod: {}", mod_entry.id);
+    }
+
+    log::info!("Recovery complete: {} mods recovered", recovered.len());
+    Ok(recovered)
   }
 }
 

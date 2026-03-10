@@ -107,6 +107,7 @@ pub fn run() {
       commands::purge_mod,
       commands::reorder_mods,
       commands::reorder_mods_by_remote_id,
+      commands::recover_mod_links,
       commands::is_game_running,
       commands::parse_deep_link,
       commands::get_deep_link_debug_info,
