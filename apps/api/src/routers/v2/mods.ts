@@ -18,7 +18,10 @@ import { featureFlagsService } from "@/services/feature-flags";
 import { formatModDownloads } from "@/lib/utils";
 import { publicProcedure } from "../../lib/orpc";
 import { ModSyncService } from "../../services/mod-sync";
-import { ForceSyncOutputSchema } from "../../validation/mods";
+import {
+  ForceSyncInputSchema,
+  ForceSyncOutputSchema,
+} from "../../validation/mods";
 
 const modRepository = new ModRepository(db);
 const modDownloadRepository = new ModDownloadRepository(db);
@@ -153,11 +156,14 @@ export const modsRouter = {
 
   forceSyncV2: publicProcedure
     .route({ method: "POST", path: "/v2/sync" })
+    .input(ForceSyncInputSchema)
     .output(ForceSyncOutputSchema)
-    .handler(async () => {
+    .handler(async ({ input }) => {
       try {
         const syncService = ModSyncService.getInstance();
-        const result = await syncService.synchronizeMods();
+        const result = input.modId
+          ? await syncService.synchronizeMod(input.modId)
+          : await syncService.synchronizeMods();
 
         if (!result.success) {
           throw new ORPCError("INTERNAL_SERVER_ERROR", {
