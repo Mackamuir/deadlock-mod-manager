@@ -5,7 +5,7 @@ import { toast } from "@deadlock-mods/ui/components/sonner";
 import { ArrowLeft, RefreshCw, Trash } from "@deadlock-mods/ui/icons";
 import { Warning } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router";
 import ModButton from "@/components/mod-browsing/mod-button";
@@ -93,20 +93,26 @@ const Mod = () => {
 
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
 
-  const currentModUpdate = updatableMods.filter(
-    (update) => update.mod.remoteId === mod?.remoteId,
-  );
-
   const forceUpdate = () => {
     if (!mod || !availableFiles?.length) return;
     setUpdateDialogOpen(true);
   };
 
-  const forceUpdateData =
-    mod && availableFiles?.length ? [{ mod, downloads: availableFiles }] : [];
+  const forceUpdateData = useMemo(
+    () =>
+      mod && availableFiles?.length ? [{ mod, downloads: availableFiles }] : [],
+    [mod, availableFiles],
+  );
 
-  const effectiveUpdateData =
-    currentModUpdate.length > 0 ? currentModUpdate : forceUpdateData;
+  const currentModUpdate = useMemo(
+    () => updatableMods.filter((update) => update.mod.remoteId === mod?.remoteId),
+    [updatableMods, mod?.remoteId],
+  );
+
+  const effectiveUpdateData = useMemo(
+    () => (currentModUpdate.length > 0 ? currentModUpdate : forceUpdateData),
+    [currentModUpdate, forceUpdateData],
+  );
 
   const deleteMod = async () => {
     if (!localMod) {
