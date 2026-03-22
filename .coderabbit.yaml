@@ -1,10 +1,8 @@
 language: en-US
 tone_instructions: >-
-  Very chill and relaxed, don't act like you're smarter than the authors.
-  This is a Tauri v2 desktop app monorepo (React + Rust) for managing Deadlock game mods.
+  Chill and relaxed. Don't lecture contributors. Use .cursor/rules/ as soft guidelines, not a critique checklist.
 early_access: false
 enable_free_tier: true
-inheritance: false
 reviews:
   profile: chill
   request_changes_workflow: true
@@ -79,6 +77,23 @@ reviews:
     - '!**/node_modules/**'
     - '!apps/desktop/src/locales/*/translation.json'
   path_instructions:
+    # ── General Conventions ───────────────────────────────────────────
+    - path: '**'
+      instructions: >-
+        This is a Tauri v2 desktop app monorepo (React + Rust) for managing
+        Deadlock game mods. The .cursor/rules/ files describe project conventions
+        — treat them as soft guidelines to inform reviews, not as a checklist to
+        nitpick contributors. When a convention is relevant, link to the project
+        docs rather than explaining inline. Documentation lives at
+        https://docs.deadlockmods.app/ and maps from apps/docs/content/docs/ paths
+        (e.g., developer-docs/contributing.mdx becomes
+        https://docs.deadlockmods.app/developer-docs/contributing). Key pages:
+        contributing (https://docs.deadlockmods.app/developer-docs/contributing),
+        architecture (https://docs.deadlockmods.app/developer-docs/architecture),
+        dev setup (https://docs.deadlockmods.app/developer-docs/development-setup),
+        project structure (https://docs.deadlockmods.app/developer-docs/project-structure).
+        For security-related changes, reference SECURITY.md in the repo root.
+
     # ── Tauri Desktop App ──────────────────────────────────────────────
     - path: 'apps/desktop/src-tauri/**'
       instructions: >-
@@ -87,6 +102,7 @@ reviews:
         management. Check that Tauri plugin usage follows v2 patterns. Ensure
         no panics in production code paths — use Result types. Watch for
         thread-safety issues with shared state.
+
     - path: 'apps/desktop/src/**'
       instructions: >-
         Desktop frontend: React + TypeScript + TailwindCSS v4. Enforce strict
@@ -95,6 +111,7 @@ reviews:
         not hardcoded English. Use React Query mutations for async operations,
         not manual useState for loading state. Use Zustand for client state.
         Components should use Radix UI primitives from packages/ui.
+
     - path: 'apps/desktop/src/locales/**'
       instructions: >-
         Translation files. Ensure JSON is valid, keys match the English base,
@@ -109,6 +126,7 @@ reviews:
         Check for missing auth middleware on protected routes. Database queries
         should use Drizzle ORM — no raw SQL. Ensure OpenAPI schema stays in
         sync with route definitions.
+
     - path: 'apps/auth/**'
       instructions: >-
         Authentication service using Better Auth. Security-critical — review
@@ -129,6 +147,7 @@ reviews:
         TanStack Start web app. Check for SSR compatibility issues, proper
         data loading with TanStack Router loaders, and SEO metadata.
         Ensure no desktop-only Tauri APIs leak into web code.
+
     - path: 'apps/docs/**'
       instructions: >-
         Next.js documentation site with Fumadocs. Review for accuracy and
@@ -197,6 +216,21 @@ reviews:
         GitHub Actions CI/CD. Check for pinned action versions (use SHA not
         tags), proper secret usage, and no credential exposure in logs.
         Ensure workflow permissions follow least-privilege principle.
+
+    # ── Security ──────────────────────────────────────────────────────
+    - path: 'SECURITY.md'
+      instructions: >-
+        Security policy for the project. Changes here should be reviewed
+        carefully — ensure reporting channels, response timelines, and
+        security measures are accurate.
+
+    # ── Documentation Site ────────────────────────────────────────────
+    - path: 'apps/docs/content/docs/**'
+      instructions: >-
+        Project documentation source. These files are published to
+        https://docs.deadlockmods.app/. Ensure links, code examples,
+        and instructions are accurate. When reviewing PRs that touch
+        both code and docs, verify the docs reflect the code changes.
 
     # ── Configuration ──────────────────────────────────────────────────
     - path: 'turbo.json'
@@ -382,6 +416,7 @@ knowledge_base:
       - 'CONTRIBUTING.md'
       - 'AGENTS.md'
       - 'AI_POLICY.md'
+      - 'SECURITY.md'
       - '.cursor/rules/**'
   learnings:
     scope: auto
