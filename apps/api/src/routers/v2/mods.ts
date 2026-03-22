@@ -6,6 +6,7 @@ import {
 import {
   CheckUpdatesInputSchema,
   CheckUpdatesResponseSchema,
+  ListModsInputSchema,
   ModDownloadsResponseSchema,
   ModDownloadsV2ResponseSchema,
   ModIdParamSchema,
@@ -26,9 +27,10 @@ const modDownloadRepository = new ModDownloadRepository(db);
 export const modsRouter = {
   listModsV2: publicProcedure
     .route({ method: "GET", path: "/v2/mods" })
+    .input(ListModsInputSchema)
     .output(ModsListResponseSchema)
-    .handler(async () => {
-      const allMods = await modRepository.findAll();
+    .handler(async ({ input }) => {
+      const allMods = await modRepository.findAll(input ?? undefined);
       return allMods.map(toModDto);
     }),
 

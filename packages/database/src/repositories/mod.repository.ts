@@ -1,18 +1,42 @@
 import { EntityNotFoundError } from "@deadlock-mods/common";
-import { and, desc, eq, inArray } from "@deadlock-mods/database";
+import { and, asc, desc, eq, inArray } from "@deadlock-mods/database";
 import type { Database } from "../client";
 import type { Mod, NewMod } from "../schema/mods";
 import { mods } from "../schema/mods";
 
+export interface FindAllOptions {
+  sortBy?: "downloadCount" | "remoteAddedAt" | "remoteUpdatedAt";
+  order?: "asc" | "desc";
+  limit?: number;
+}
+
+const sortColumnMap: Record<
+  NonNullable<FindAllOptions["sortBy"]>,
+  typeof mods.downloadCount | typeof mods.remoteAddedAt | typeof mods.remoteUpdatedAt
+> = {
+  downloadCount: mods.downloadCount,
+  remoteAddedAt: mods.remoteAddedAt,
+  remoteUpdatedAt: mods.remoteUpdatedAt,
+};
+
 export class ModRepository {
   constructor(private readonly db: Database) {}
 
-  async findAll(): Promise<Mod[]> {
-    return await this.db
+  async findAll(options?: FindAllOptions): Promise<Mod[]> {
+    const column = sortColumnMap[options?.sortBy ?? "remoteUpdatedAt"];
+    const orderFn = options?.order === "asc" ? asc : desc;
+
+    const query = this.db
       .select()
       .from(mods)
       .where(eq(mods.isBlacklisted, false))
-      .orderBy(desc(mods.remoteUpdatedAt));
+      .orderBy(orderFn(column));
+
+    if (options?.limit) {
+      return await query.limit(options.limit);
+    }
+
+    return await query;
   }
 
   async findById(id: string): Promise<Mod | null> {

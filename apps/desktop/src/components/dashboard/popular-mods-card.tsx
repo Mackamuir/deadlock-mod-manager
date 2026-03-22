@@ -3,7 +3,7 @@ import { Skeleton } from "@deadlock-mods/ui/components/skeleton";
 import { FireIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { getMods } from "@/lib/api";
+import { getPopularMods } from "@/lib/api";
 import { STALE_TIME_API } from "@/lib/query-constants";
 import { DashboardCard } from "./dashboard-card";
 import { PopularModItem } from "./popular-mod-item";
@@ -42,16 +42,12 @@ const PopularModsList = ({ mods }: { mods: ModDto[] }) => (
 
 export const PopularModsCard = () => {
   const { t } = useTranslation();
-  const { data: mods, isPending } = useQuery({
-    queryKey: ["mods"],
-    queryFn: getMods,
+  const { data: popularMods, isPending } = useQuery({
+    queryKey: ["mods", "popular"],
+    queryFn: () => getPopularMods(5),
     staleTime: STALE_TIME_API,
     refetchOnWindowFocus: false,
   });
-
-  const popularMods = mods
-    ?.sort((a, b) => b.downloadCount - a.downloadCount)
-    .slice(0, 5);
 
   return (
     <DashboardCard

@@ -56,6 +56,17 @@ export const ModIdParamSchema = z.object({
   id: z.string(),
 });
 
+export const ListModsInputSchema = z
+  .object({
+    sortBy: z
+      .enum(["downloadCount", "remoteAddedAt", "remoteUpdatedAt"])
+      .optional()
+      .default("remoteUpdatedAt"),
+    order: z.enum(["asc", "desc"]).optional().default("desc"),
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+  })
+  .optional();
+
 // API response schemas
 export const ModsListResponseSchema = z.array(ModDtoSchema);
 export const ModDownloadsResponseSchema = z.array(ModDownloadDtoSchema);

@@ -80,7 +80,19 @@ export const getAnnouncements = async () => {
 
 export const getMods = async () => {
   return await apiRequest<ModDto[]>("/api/v2/mods");
-}; // TODO: pagination
+};
+
+export const getLatestMods = async (limit: number) => {
+  return await apiRequest<ModDto[]>(
+    `/api/v2/mods?sortBy=remoteAddedAt&order=desc&limit=${limit}`,
+  );
+};
+
+export const getPopularMods = async (limit: number) => {
+  return await apiRequest<ModDto[]>(
+    `/api/v2/mods?sortBy=downloadCount&order=desc&limit=${limit}`,
+  );
+};
 
 export const getMod = async (remoteId: string) => {
   return await apiRequest<ModDto>(`/api/v2/mods/${remoteId}`);

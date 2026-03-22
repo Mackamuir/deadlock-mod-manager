@@ -3,27 +3,19 @@ import { Skeleton } from "@deadlock-mods/ui/components/skeleton";
 import { ClockIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { getMods } from "@/lib/api";
+import { getLatestMods } from "@/lib/api";
 import { STALE_TIME_API } from "@/lib/query-constants";
 import { DashboardCard } from "./dashboard-card";
 import { LatestModItem } from "./latest-mod-item";
 
 export const LatestModsCard = () => {
   const { t } = useTranslation();
-  const { data: mods, isPending } = useQuery({
-    queryKey: ["mods"],
-    queryFn: getMods,
+  const { data: latestMods, isPending } = useQuery({
+    queryKey: ["mods", "latest"],
+    queryFn: () => getLatestMods(5),
     staleTime: STALE_TIME_API,
     refetchOnWindowFocus: false,
   });
-
-  const latestMods = mods
-    ?.sort(
-      (a, b) =>
-        new Date(b.remoteAddedAt).getTime() -
-        new Date(a.remoteAddedAt).getTime(),
-    )
-    .slice(0, 5);
 
   const modsContent =
     latestMods && latestMods.length > 0 ? (
