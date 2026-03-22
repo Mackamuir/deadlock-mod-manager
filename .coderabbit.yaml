@@ -1,8 +1,16 @@
 language: en-US
 tone_instructions: >-
+<<<<<<< HEAD
   Chill and relaxed. Don't lecture contributors. Use .cursor/rules/ as soft guidelines, not a critique checklist.
 early_access: false
 enable_free_tier: true
+=======
+  Very chill and relaxed, don't act like you're smarter than the authors.
+  This is a Tauri v2 desktop app monorepo (React + Rust) for managing Deadlock game mods.
+early_access: false
+enable_free_tier: true
+inheritance: false
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
 reviews:
   profile: chill
   request_changes_workflow: true
@@ -77,6 +85,7 @@ reviews:
     - '!**/node_modules/**'
     - '!apps/desktop/src/locales/*/translation.json'
   path_instructions:
+<<<<<<< HEAD
     # ── General Conventions ───────────────────────────────────────────
     - path: '**'
       instructions: >-
@@ -94,6 +103,8 @@ reviews:
         project structure (https://docs.deadlockmods.app/developer-docs/project-structure).
         For security-related changes, reference SECURITY.md in the repo root.
 
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
     # ── Tauri Desktop App ──────────────────────────────────────────────
     - path: 'apps/desktop/src-tauri/**'
       instructions: >-
@@ -102,7 +113,10 @@ reviews:
         management. Check that Tauri plugin usage follows v2 patterns. Ensure
         no panics in production code paths — use Result types. Watch for
         thread-safety issues with shared state.
+<<<<<<< HEAD
 
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
     - path: 'apps/desktop/src/**'
       instructions: >-
         Desktop frontend: React + TypeScript + TailwindCSS v4. Enforce strict
@@ -111,7 +125,10 @@ reviews:
         not hardcoded English. Use React Query mutations for async operations,
         not manual useState for loading state. Use Zustand for client state.
         Components should use Radix UI primitives from packages/ui.
+<<<<<<< HEAD
 
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
     - path: 'apps/desktop/src/locales/**'
       instructions: >-
         Translation files. Ensure JSON is valid, keys match the English base,
@@ -126,7 +143,10 @@ reviews:
         Check for missing auth middleware on protected routes. Database queries
         should use Drizzle ORM — no raw SQL. Ensure OpenAPI schema stays in
         sync with route definitions.
+<<<<<<< HEAD
 
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
     - path: 'apps/auth/**'
       instructions: >-
         Authentication service using Better Auth. Security-critical — review
@@ -147,7 +167,10 @@ reviews:
         TanStack Start web app. Check for SSR compatibility issues, proper
         data loading with TanStack Router loaders, and SEO metadata.
         Ensure no desktop-only Tauri APIs leak into web code.
+<<<<<<< HEAD
 
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
     - path: 'apps/docs/**'
       instructions: >-
         Next.js documentation site with Fumadocs. Review for accuracy and
@@ -217,6 +240,7 @@ reviews:
         tags), proper secret usage, and no credential exposure in logs.
         Ensure workflow permissions follow least-privilege principle.
 
+<<<<<<< HEAD
     # ── Security ──────────────────────────────────────────────────────
     - path: 'SECURITY.md'
       instructions: >-
@@ -232,6 +256,8 @@ reviews:
         and instructions are accurate. When reviewing PRs that touch
         both code and docs, verify the docs reflect the code changes.
 
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
     # ── Configuration ──────────────────────────────────────────────────
     - path: 'turbo.json'
       instructions: >-
@@ -416,7 +442,10 @@ knowledge_base:
       - 'CONTRIBUTING.md'
       - 'AGENTS.md'
       - 'AI_POLICY.md'
+<<<<<<< HEAD
       - 'SECURITY.md'
+=======
+>>>>>>> 58d3bcb12ddc8a6000fcbd0cea59a9297013dcd4
       - '.cursor/rules/**'
   learnings:
     scope: auto
